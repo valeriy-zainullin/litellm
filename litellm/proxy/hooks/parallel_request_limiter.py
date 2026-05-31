@@ -1,7 +1,7 @@
 import asyncio
 import sys
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from fastapi import HTTPException
 from pydantic import BaseModel
@@ -294,12 +294,25 @@ class _PROXY_MaxParallelRequestsHandler(CustomLogger):
 
         # Check if request under RPM/TPM per model for a given API Key
         _model = data.get("model", None)
-        _tpm_limit_for_key_model = get_key_model_tpm_limit(
-            user_api_key_dict, model_name=_model
+
+        # 1. Try per-model limits from UserAPIKeyAuth (populated at auth time)
+        _tpm_limit_for_key_model: Optional[Dict[str, int]] = (
+            user_api_key_dict.tpm_limit_per_model
         )
-        _rpm_limit_for_key_model = get_key_model_rpm_limit(
-            user_api_key_dict, model_name=_model
+        _rpm_limit_for_key_model: Optional[Dict[str, int]] = (
+            user_api_key_dict.rpm_limit_per_model
         )
+
+        # 2. Fallback to legacy lookup
+        if _tpm_limit_for_key_model is None:
+            _tpm_limit_for_key_model = get_key_model_tpm_limit(
+                user_api_key_dict, model_name=_model
+            )
+        if _rpm_limit_for_key_model is None:
+            _rpm_limit_for_key_model = get_key_model_rpm_limit(
+                user_api_key_dict, model_name=_model
+            )
+
         if _tpm_limit_for_key_model is not None or _rpm_limit_for_key_model is not None:
             request_count_api_key = (
                 f"{api_key}::{_model}::{precise_minute}::request_count"
@@ -314,6 +327,19 @@ class _PROXY_MaxParallelRequestsHandler(CustomLogger):
                 if _rpm_limit_for_key_model:
                     rpm_limit_for_model = _rpm_limit_for_key_model.get(_model)
 
+            # If per-model TPM is set, use it; otherwise fall back to key-level TPM
+            _effective_tpm = (
+                tpm_limit_for_model
+                if tpm_limit_for_model is not None
+                else tpm_limit
+            )
+            # If per-model RPM is set, use it; otherwise fall back to key-level RPM
+            _effective_rpm = (
+                rpm_limit_for_model
+                if rpm_limit_for_model is not None
+                else rpm_limit
+            )
+
             new_val = await self.check_key_in_limits(
                 user_api_key_dict=user_api_key_dict,
                 cache=cache,
@@ -322,8 +348,8 @@ class _PROXY_MaxParallelRequestsHandler(CustomLogger):
                 max_parallel_requests=sys.maxsize,  # TODO: Support max parallel requests for a model
                 current=cache_objects["request_count_api_key_model"],
                 request_count_api_key=request_count_api_key,
-                tpm_limit=tpm_limit_for_model or sys.maxsize,
-                rpm_limit=rpm_limit_for_model or sys.maxsize,
+                tpm_limit=_effective_tpm or sys.maxsize,
+                rpm_limit=_effective_rpm or sys.maxsize,
                 rate_limit_type="model_per_key",
                 values_to_update_in_cache=values_to_update_in_cache,
             )
@@ -331,10 +357,10 @@ class _PROXY_MaxParallelRequestsHandler(CustomLogger):
             _remaining_requests = None
             # Add remaining tokens, requests to metadata
             if new_val:
-                if tpm_limit_for_model is not None:
-                    _remaining_tokens = tpm_limit_for_model - new_val["current_tpm"]
-                if rpm_limit_for_model is not None:
-                    _remaining_requests = rpm_limit_for_model - new_val["current_rpm"]
+                if _effective_tpm is not None:
+                    _remaining_tokens = _effective_tpm - new_val["current_tpm"]
+                if _effective_rpm is not None:
+                    _remaining_requests = _effective_rpm - new_val["current_rpm"]
 
             _remaining_limits_data = {
                 f"litellm-key-remaining-tokens-{_model}": _remaining_tokens,

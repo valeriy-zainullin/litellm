@@ -1662,6 +1662,15 @@ async def _user_api_key_auth_builder(  # noqa: PLR0915
             valid_token_dict = valid_token.model_dump(exclude_none=True)
             valid_token_dict.pop("token", None)
 
+            # Populate per-model rate limits from key metadata
+            if valid_token.metadata:
+                _model_rpm = valid_token.metadata.get("model_rpm_limit")
+                if _model_rpm is not None:
+                    valid_token_dict["rpm_limit_per_model"] = _model_rpm
+                _model_tpm = valid_token.metadata.get("model_tpm_limit")
+                if _model_tpm is not None:
+                    valid_token_dict["tpm_limit_per_model"] = _model_tpm
+
             if _end_user_object is not None:
                 valid_token_dict.update(end_user_params)
                 valid_token_dict["end_user_object_permission"] = (

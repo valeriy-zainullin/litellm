@@ -1290,6 +1290,15 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
         """
         Add model-specific rate limit descriptor for API key if applicable.
 
+        Uses rpm_limit_per_model/tpm_limit_per_model from UserAPIKeyAuth
+        (populated from key metadata at auth time) with fallback to
+        get_key_model_rpm_limit/get_key_model_tpm_limit.
+
+        When per-model limits are set for the requested model, they take
+        priority over the key-level rpm_limit/tpm_limit — the per-model
+        descriptor is added and the key-level descriptor is skipped so
+        the two don't stack.
+
         Args:
             user_api_key_dict: User API key authentication dictionary
             requested_model: The model being requested
@@ -1303,12 +1312,25 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
         if not requested_model:
             return
 
-        _tpm_limit_for_key_model = get_key_model_tpm_limit(
-            user_api_key_dict, model_name=requested_model
+        # 1. Try per-model limits from UserAPIKeyAuth (populated at auth time)
+        _tpm_limit_for_key_model: Optional[Dict[str, int]] = (
+            user_api_key_dict.tpm_limit_per_model
         )
-        _rpm_limit_for_key_model = get_key_model_rpm_limit(
-            user_api_key_dict, model_name=requested_model
+        _rpm_limit_for_key_model: Optional[Dict[str, int]] = (
+            user_api_key_dict.rpm_limit_per_model
         )
+
+        # 2. Fallback to legacy lookup (metadata -> model_max_budget -> team_metadata -> deployment default)
+        # Check TPM and RPM independently so a per-model TPM limit doesn't
+        # prevent falling back to the legacy RPM lookup, and vice versa.
+        if _tpm_limit_for_key_model is None:
+            _tpm_limit_for_key_model = get_key_model_tpm_limit(
+                user_api_key_dict, model_name=requested_model
+            )
+        if _rpm_limit_for_key_model is None:
+            _rpm_limit_for_key_model = get_key_model_rpm_limit(
+                user_api_key_dict, model_name=requested_model
+            )
 
         if _tpm_limit_for_key_model is None and _rpm_limit_for_key_model is None:
             return
@@ -1344,6 +1366,16 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
                 },
             )
         )
+
+        # When per-model limits are set for this model, remove the key-level
+        # api_key descriptor so the two don't stack — the per-model limit
+        # is more specific and takes priority.
+        if model_specific_rpm_limit is not None or model_specific_tpm_limit is not None:
+            descriptors[:] = [
+                d
+                for d in descriptors
+                if not (d["key"] == "api_key" and d["value"] == user_api_key_dict.api_key)
+            ]
 
     def _should_enforce_rate_limit(
         self,
